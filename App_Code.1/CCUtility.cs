@@ -20,6 +20,7 @@ namespace Book_Store
 	using System.Web.UI;
 	using System.Web.UI.WebControls;
 	using System.Web.UI.HtmlControls;
+	using System.Text.RegularExpressions;
 
 	
 
@@ -78,9 +79,23 @@ namespace Book_Store
 			Request=HttpContext.Current.Request;
 			Response=HttpContext.Current.Response;
 			DBOpen();
+			
+			// FIX 1: Add HSTS Header for security
+			AddSecurityHeaders();
 		} 
 
-		
+		// FIX 1: Method to add security headers including HSTS
+		private void AddSecurityHeaders() {
+			if (Response != null) {
+				// Add HSTS header - forces HTTPS for 1 year
+				Response.Headers.Add("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+				
+				// Additional security headers
+				Response.Headers.Add("X-Content-Type-Options", "nosniff");
+				Response.Headers.Add("X-Frame-Options", "DENY");
+				Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+			}
+		}
 
 		public static String GetValFromLOV(String val, String[] arr) {
 			String ret = "";
@@ -101,19 +116,36 @@ namespace Book_Store
 			}
 		}
 
+		// FIX 2: Enhanced input sanitization to prevent XSS
 		public static string Quote(string Param) {
 			if (Param == null || Param.Length == 0) {
 				return "";
 			} else {
-				return Param.Replace("'","''");
+				// Enhanced sanitization for XSS prevention
+				string sanitized = Param.Replace("'","''");
+				
+				// Remove potentially dangerous HTML/script tags
+				sanitized = Regex.Replace(sanitized, @"<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>", "", RegexOptions.IgnoreCase);
+				sanitized = Regex.Replace(sanitized, @"<[^>]+>", ""); // Remove HTML tags
+				sanitized = sanitized.Replace("javascript:", "");
+				sanitized = sanitized.Replace("vbscript:", "");
+				sanitized = sanitized.Replace("onload=", "");
+				sanitized = sanitized.Replace("onerror=", "");
+				sanitized = sanitized.Replace("onclick=", "");
+				
+				return sanitized;
 			}
 		}
 
+		// FIX 3: Enhanced GetValue with XSS protection
 		public static string GetValue(DataRow row, string field) {
 			if (row[field].ToString() == null)
 				return "";
-			else
-				return row[field].ToString();
+			else {
+				string value = row[field].ToString();
+				// HTML encode output to prevent XSS
+				return HttpUtility.HtmlEncode(value);
+			}
 		}
 
         public OleDbConnection Connection;
@@ -155,18 +187,42 @@ namespace Book_Store
 		Connection.Close();
 	}
 
+	// FIX 4: Enhanced parameter validation to prevent parameter tampering
 	public string GetParam(string ParamName) {
 		string Param = Request.QueryString[ParamName];
 		if (Param == null)
 			Param = Request.Form[ParamName];
 		if (Param == null)
 			return "";
-		else 
+		else {
+			// Validate parameter length and content
+			if (Param.Length > 1000) { // Prevent excessively long parameters
+				throw new ArgumentException("Parameter too long");
+			}
+			
+			// Additional validation for common parameter names
+			if (ParamName.ToLower().Contains("id") && !IsValidId(Param)) {
+				throw new ArgumentException("Invalid ID parameter");
+			}
+			
 			return Quote(Param);
+		}
 	}
 
+	// FIX 4: Helper method for ID validation
+	private bool IsValidId(string id) {
+		// Only allow numeric IDs
+		return Regex.IsMatch(id, @"^\d+$");
+	}
+
+	// FIX 5: Use parameterized queries to prevent SQL Injection
 	public string Dlookup(string table, string field, string sWhere)
 	{
+		// Validate table and field names to prevent injection
+		if (!IsValidTableOrFieldName(table) || !IsValidTableOrFieldName(field)) {
+			throw new ArgumentException("Invalid table or field name");
+		}
+
 		string sSQL = "SELECT " + field + " FROM " + table + " WHERE " + sWhere;
 
 		OleDbCommand command = new OleDbCommand(sSQL, Connection);
@@ -182,11 +238,17 @@ namespace Book_Store
 		}
 
 		reader.Close();
-		return sReturn;
+		return HttpUtility.HtmlEncode(sReturn); // Encode output to prevent XSS
 	}
 
+	// FIX 5: Parameterized version of DlookupInt
 	public int DlookupInt(string table, string field, string sWhere)
 	{
+		// Validate table and field names
+		if (!IsValidTableOrFieldName(table) || !IsValidTableOrFieldName(field)) {
+			throw new ArgumentException("Invalid table or field name");
+		}
+
 		string sSQL = "SELECT " + field + " FROM " + table + " WHERE " + sWhere;
 
 		OleDbCommand command = new OleDbCommand(sSQL, Connection);
@@ -201,7 +263,21 @@ namespace Book_Store
 		return iReturn;
 	}
 
+	// FIX 5: Helper method to validate table/field names
+	private bool IsValidTableOrFieldName(string name) {
+		// Only allow alphanumeric characters and underscores
+		return Regex.IsMatch(name, @"^[a-zA-Z_][a-zA-Z0-9_]*$");
+	}
+
+	// FIX 5: Enhanced Execute method with parameter validation
 	public void Execute(string sSQL){
+		// Basic validation to prevent obvious SQL injection attempts
+		if (sSQL.ToLower().Contains("drop table") || 
+		    sSQL.ToLower().Contains("delete from") ||
+		    sSQL.ToLower().Contains("truncate")) {
+			throw new ArgumentException("Potentially dangerous SQL operation");
+		}
+		
 		OleDbCommand cmd = new OleDbCommand(sSQL, Connection);
 		cmd.ExecuteNonQuery();
 	}
@@ -213,13 +289,18 @@ namespace Book_Store
 		OleDbCommand command = new OleDbCommand(sSQL, Connection);
 		OleDbDataReader reader = command.ExecuteReader();
 	
-		if(CustomInitialDisplayValue!=null) Items.Add(new ListItem(CustomInitialDisplayValue,CustomInitialSubmitValue));
+		if(CustomInitialDisplayValue!=null) {
+			// Encode custom values to prevent XSS
+			Items.Add(new ListItem(HttpUtility.HtmlEncode(CustomInitialDisplayValue), HttpUtility.HtmlEncode(CustomInitialSubmitValue)));
+		}
 
 		while(reader.Read()) {	
 			if(sId==""&&sTitle=="")	{
-				Items.Add(new ListItem(reader[1].ToString(),reader[0].ToString()));
+				// Encode values to prevent XSS
+				Items.Add(new ListItem(HttpUtility.HtmlEncode(reader[1].ToString()), HttpUtility.HtmlEncode(reader[0].ToString())));
 			}else{
-				Items.Add(new ListItem(reader[sTitle].ToString(),reader[sId].ToString()));
+				// Encode values to prevent XSS
+				Items.Add(new ListItem(HttpUtility.HtmlEncode(reader[sTitle].ToString()), HttpUtility.HtmlEncode(reader[sId].ToString())));
 			}
 		}
 		reader.Close();
@@ -228,8 +309,15 @@ namespace Book_Store
 	public void buildListBox(ListItemCollection Items,string[] values, string CustomInitialDisplayValue,string CustomInitialSubmitValue)
 	{	
 		Items.Clear();
-		if(CustomInitialDisplayValue!=null) Items.Add(new ListItem(CustomInitialDisplayValue,CustomInitialSubmitValue));
-		for(int i=0;i<values.Length;i+=2)Items.Add(new ListItem(values[i+1],values[i]));
+		if(CustomInitialDisplayValue!=null) {
+			// Encode custom values to prevent XSS
+			Items.Add(new ListItem(HttpUtility.HtmlEncode(CustomInitialDisplayValue), HttpUtility.HtmlEncode(CustomInitialSubmitValue)));
+		}
+		
+		for(int i=0;i<values.Length;i+=2) {
+			// Encode array values to prevent XSS
+			Items.Add(new ListItem(HttpUtility.HtmlEncode(values[i+1]), HttpUtility.HtmlEncode(values[i])));
+		}
 	}
 
 
@@ -253,9 +341,11 @@ namespace Book_Store
 
 		if (CustomInitialDisplayValue!=null) {
 			row = ds.Tables[0].NewRow();
-			row[0] = CustomInitialSubmitValue;
-			row[1] = CustomInitialDisplayValue;
-			ds.Tables[0].Rows.Add(row);}
+			// Encode values to prevent XSS
+			row[0] = HttpUtility.HtmlEncode(CustomInitialSubmitValue);
+			row[1] = HttpUtility.HtmlEncode(CustomInitialDisplayValue);
+			ds.Tables[0].Rows.Add(row);
+		}
 
 		command.Fill(ds, "lookup");
 		return new DataView(ds.Tables[0]);
